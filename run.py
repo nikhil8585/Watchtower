@@ -35,6 +35,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 # Imports (after sys.path is set)
 # ---------------------------------------------------------------------------
 from app.config import Config
+from app.health import run_startup_checks
 from app.logger import logger, setup_logger
 from app.watchtower import Watchtower
 
@@ -67,7 +68,11 @@ def main() -> None:
     setup_logger(config.log_level)
     logger.info("Configuration loaded: {}", config.safe_repr())
 
-    # Phase 4: run
+    # Phase 4: startup self-check — verifies all dependencies before
+    # entering the scheduler.  Calls sys.exit(1) on any failure.
+    run_startup_checks(config)
+
+    # Phase 5: run
     watcher = Watchtower(config)
     watcher.start()
 
