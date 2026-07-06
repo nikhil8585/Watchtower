@@ -48,26 +48,25 @@ class TryRatingSelectors:
     """
 
     # ── Authentication ────────────────────────────────────────────────────────
+    # Confirmed against live TryRating login page (screenshot verified).
 
-    # Primary email / username input on the login form
+    # Email input — label on page is "Email", field accepts email addresses.
+    # input[type='email'] is the most reliable; extras are fallbacks.
     USERNAME_INPUT: str = (
         "input[type='email'], "
         "input[name='email'], "
-        "input[name='username'], "
-        "input[placeholder*='email' i], "
-        "input[placeholder*='username' i]"
+        "input[placeholder*='email' i]"
     )
 
-    # Password input on the login form
+    # Password input — standard, confirmed present on login page.
     PASSWORD_INPUT: str = "input[type='password']"
 
-    # The submit / "Sign in" button
+    # Submit button — confirmed label is "Login" (exact text, blue button).
+    # Placed first; fallbacks handle any future label changes.
     LOGIN_BUTTON: str = (
+        "button:has-text('Login'), "
         "button[type='submit'], "
-        "input[type='submit'], "
-        "button:has-text('Sign in'), "
-        "button:has-text('Log in'), "
-        "button:has-text('Login')"
+        "input[type='submit']"
     )
 
     # An element that is ONLY present after a successful login.
@@ -83,11 +82,12 @@ class TryRatingSelectors:
     )
 
     # Element present on the login page — used to detect session expiry.
-    # We check for this after navigating to any page.
+    # Confirmed: the page heading is "Login to TryRating" and a password
+    # field is always visible on the login page.
     LOGIN_PAGE_INDICATOR: str = (
-        "form.login-form, "
-        "[data-testid='login-form'], "
-        "input[type='password']"
+        "input[type='password'], "
+        "h1:has-text('Login to TryRating'), "
+        "[data-testid='login-form']"
     )
 
     # URL keyword that identifies the login page.
