@@ -29,9 +29,10 @@ ENV/
 playwright-browsers/
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
-logs/
-*.log
-*.log.gz
+# Exclude log files but allow directory placeholder (.gitkeep)
+logs/*.log
+logs/*.log.gz
+logs/*.gz
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 # state.json contains runtime data — do not commit

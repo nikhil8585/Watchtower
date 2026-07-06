@@ -1,0 +1,3 @@
+# Watchtower log files
+# Daily rotating logs are created automatically at runtime.
+# All .log and .log.gz files are gitignored.
