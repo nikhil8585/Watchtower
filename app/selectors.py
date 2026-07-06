@@ -106,9 +106,11 @@ class TryRatingSelectors:
 
     # ── Survey page ───────────────────────────────────────────────────────────
 
-    # The "Get Surveys" / "Check Surveys" / "Refresh" call-to-action button.
+    # The "Check Now" / "Get Surveys" / "Check Surveys" call-to-action button.
+    # Confirmed from live TryRating UI: button is labelled "Check Now".
     # This button fetches fresh tasks from TryRating's server.
     GET_SURVEYS_BUTTON: str = (
+        "button:has-text('Check Now'), "
         "button:has-text('Get Surveys'), "
         "button:has-text('Check Surveys'), "
         "button:has-text('Find Surveys'), "
