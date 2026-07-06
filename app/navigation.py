@@ -88,9 +88,8 @@ def navigate_to_surveys(page: Page) -> bool:
 
 def is_on_surveys_page(page: Page) -> bool:
     """
-    Return ``True`` if the current page appears to be the surveys page.
+    Return ``True`` if the current page is the TryRating surveys page.
 
-    Used as a lightweight pre-check before running the survey detector,
-    to avoid scraping the wrong page after an unexpected redirect.
+    Confirmed URL: ``tryrating.com/app/survey/rate``
     """
     return "survey" in page.url.lower()

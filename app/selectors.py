@@ -69,21 +69,18 @@ class TryRatingSelectors:
         "input[type='submit']"
     )
 
-    # An element that is ONLY present after a successful login.
-    # Used to confirm the session is established.
-    # Examples: top navigation bar, user avatar, dashboard heading.
+    # An element ONLY present after a successful login.
+    # Confirmed: post-login page is tryrating.com/app/home
+    # showing the heading "Welcome to TryRating".
     LOGIN_SUCCESS_INDICATOR: str = (
-        "nav.authenticated, "
-        ".dashboard-header, "
-        "[data-testid='user-menu'], "
-        ".user-avatar, "
-        "header .user-name, "
-        ".main-nav"
+        "h1:has-text('Welcome to TryRating'), "
+        "button:has-text('Get a Survey'), "
+        ".sidebar, "
+        "nav"
     )
 
     # Element present on the login page — used to detect session expiry.
-    # Confirmed: the page heading is "Login to TryRating" and a password
-    # field is always visible on the login page.
+    # Confirmed: heading is "Login to TryRating", password field always visible.
     LOGIN_PAGE_INDICATOR: str = (
         "input[type='password'], "
         "h1:has-text('Login to TryRating'), "
@@ -91,17 +88,20 @@ class TryRatingSelectors:
     )
 
     # URL keyword that identifies the login page.
-    # Matched against the lowercased page URL.
+    # Confirmed login URL path contains 'login'.
     LOGIN_URL_FRAGMENT: str = "login"
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
-    # Sidebar / top-nav link that leads to the Surveys section
+    # Navigation to the surveys page.
+    # Two confirmed paths from the screenshots:
+    # 1. Left sidebar icon — href contains 'survey'
+    # 2. "Get a Survey" blue button on the home page (tryrating.com/app/home)
+    # Navigation module falls back to direct URL if both selectors miss.
     SURVEYS_NAV_LINK: str = (
-        "a:has-text('Surveys'), "
-        "nav a[href*='survey' i], "
-        "[data-testid='surveys-nav'], "
-        ".nav-link:has-text('Surveys')"
+        "a[href*='survey' i], "
+        "button:has-text('Get a Survey'), "
+        "[data-testid='surveys-nav']"
     )
 
     # ── Survey page ───────────────────────────────────────────────────────────

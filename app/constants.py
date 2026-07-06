@@ -36,11 +36,13 @@ STATE_FILE: Path = DATA_DIR / "state.json"
 # ---------------------------------------------------------------------------
 # TryRating URLs
 # ---------------------------------------------------------------------------
-# Update these if TryRating changes its domain or route structure.
+# Confirmed from live site screenshots (2025-07).
+# Base domain: tryrating.com (NOT app.tryrating.com)
 
-TRYRATING_BASE_URL: str = "https://app.tryrating.com"
-TRYRATING_LOGIN_URL: str = "https://app.tryrating.com/login"
-TRYRATING_SURVEYS_URL: str = "https://app.tryrating.com/surveys"
+TRYRATING_BASE_URL: str = "https://tryrating.com"
+TRYRATING_LOGIN_URL: str = "https://tryrating.com/app/login"
+TRYRATING_HOME_URL: str = "https://tryrating.com/app/home"      # post-login landing
+TRYRATING_SURVEYS_URL: str = "https://tryrating.com/app/survey/rate"  # confirmed
 
 # ---------------------------------------------------------------------------
 # Playwright timeouts  (milliseconds)
