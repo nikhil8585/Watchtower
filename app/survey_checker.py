@@ -3,19 +3,29 @@ app/survey_checker.py
 =====================
 Survey detection and Request ID extraction for Watchtower.
 
-Single responsibility: given an authenticated page on the surveys URL,
-determine whether a new survey is available and return its Request ID.
-
-Extraction strategy
+Extraction approach
 -------------------
-1. Click "Get Surveys" / "Check Surveys" if the button exists.
-2. Apply random jitter (reduces bot-detection risk).
-3. Check for a dedicated request-id element via ``REQUEST_ID_ELEMENT``.
-4. Fall back to scanning all survey cards for a long numeric sequence.
+All extraction anchors to the literal label text **"Request ID"** visible
+on the TryRating survey page.  No CSS class names are used.  Three XPath
+strategies are attempted in order:
 
-Only Request ID is extracted.  All other survey metadata (task type,
-estimated time, business data, descriptions, buttons) is intentionally
-ignored per the specification.
+1. **Sibling XPath** — element immediately after the "Request ID" label
+   that contains only digits (>= 6).  Works when label and value share a
+   parent container.
+
+2. **Following XPath** — same digit constraint, but searches the entire
+   document forward from the label.  Handles non-adjacent layouts.
+
+3. **Full-page regex** — scans the complete rendered page text for any
+   standalone sequence of 6+ digits.  Last resort; validates with regex.
+
+Confirmed UI structure (2025-07, from live TryRating screenshot)::
+
+    Request ID          <- label
+    695584131           <- value (always >= 9 digits)
+
+Only Request ID is extracted.  Task type, estimated time, business data,
+descriptions and button labels are all intentionally ignored.
 """
 
 from __future__ import annotations
@@ -35,28 +45,42 @@ from app.constants import (
 from app.logger import logger
 from app.selectors import TryRatingSelectors
 
-# Matches a standalone sequence of 6 or more digits.
-# TryRating Request IDs are typically 9 digits (e.g. 695584131).
-# The lower bound of 6 guards against matching unrelated numbers
-# like CSS pixel values or short codes.
-_REQUEST_ID_PATTERN: re.Pattern[str] = re.compile(r"\b(\d{6,})\b")
+# ---------------------------------------------------------------------------
+# Compiled regex
+# ---------------------------------------------------------------------------
+
+# Matches a standalone numeric sequence of 6 or more digits.
+# TryRating IDs are typically 9 digits (e.g. 695584131).
+# Lower bound of 6 avoids false-positives on short numbers in body text.
+_REQUEST_ID_RE: re.Pattern[str] = re.compile(r"\b(\d{6,})\b")
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _extract_id_from_text(text: str) -> Optional[str]:
-    """
-    Return the first long numeric sequence found in *text*, or ``None``.
-
-    Parameters
-    ----------
-    text:
-        Raw inner-text from a DOM element.
-    """
-    match = _REQUEST_ID_PATTERN.search(text)
+def _regex_extract(text: str) -> Optional[str]:
+    """Return the first 6+-digit sequence in *text*, or ``None``."""
+    match = _REQUEST_ID_RE.search(text)
     return match.group(1) if match else None
+
+
+def _try_locator(page: Page, selector: str, timeout: int) -> Optional[str]:
+    """
+    Attempt to locate an element by *selector* and return its inner text.
+
+    Returns ``None`` on timeout or any error.
+    """
+    try:
+        el = page.locator(selector).first
+        el.wait_for(state="attached", timeout=timeout)
+        text = el.inner_text().strip()
+        return text if text else None
+    except PlaywrightTimeoutError:
+        return None
+    except Exception as exc:
+        logger.debug("Locator '{}' raised: {}", selector[:60], exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -65,122 +89,138 @@ def _extract_id_from_text(text: str) -> Optional[str]:
 
 def click_check_surveys(page: Page) -> bool:
     """
-    Click the "Get Surveys" / "Check Surveys" button if it is present.
+    Click the "Check Now" button if it is present on the surveys page.
 
-    Parameters
-    ----------
-    page:
-        Active Playwright page on the surveys URL.
+    Confirmed button label from live TryRating screenshot: **"Check Now"**.
 
     Returns
     -------
     bool
-        ``True`` if the button was found and clicked, ``False`` otherwise.
+        ``True`` if the button was found and clicked.
     """
     try:
         btn = page.locator(TryRatingSelectors.GET_SURVEYS_BUTTON).first
         btn.wait_for(state="visible", timeout=SHORT_ELEMENT_TIMEOUT)
         btn.click()
         page.wait_for_timeout(int(POST_SURVEY_CLICK_WAIT_S * 1000))
-        logger.info("'Get Surveys' button clicked — waiting for results.")
+        logger.info("'Check Now' button clicked — waiting for survey data.")
         return True
     except PlaywrightTimeoutError:
-        logger.debug("'Get Surveys' button not present — skipping click.")
+        logger.debug("'Check Now' button not present — skipping click.")
         return False
     except Exception as exc:
-        logger.warning("Unexpected error clicking 'Get Surveys' button: {}", exc)
+        logger.warning("Unexpected error clicking 'Check Now' button: {}", exc)
         return False
 
 
 def extract_request_id(page: Page) -> Optional[str]:
     """
-    Locate and return a Request ID from the current surveys page.
+    Extract a Request ID from the current surveys page using XPath.
 
-    Two strategies, in order:
+    Three strategies, in priority order:
 
-    1. **Dedicated element** — look for an element matching
-       ``REQUEST_ID_ELEMENT`` and parse its inner text.
-    2. **Card scan** — iterate all ``SURVEY_CARD`` elements and apply
-       regex extraction to their combined inner text.
+    1. **XPath sibling** — find element with text "Request ID", then get
+       the first following sibling that is all-digits with >= 6 chars.
+
+    2. **XPath following** — same but searches the whole document forward.
+       Handles layouts where label and value are not direct siblings.
+
+    3. **Full-page text scan** — reads all rendered page text and applies
+       ``_REQUEST_ID_RE`` regex.  Catches any structure not covered above.
 
     Parameters
     ----------
     page:
-        Active Playwright page, already on the surveys URL.
+        Active Playwright page on ``tryrating.com/app/survey/rate``.
 
     Returns
     -------
     str | None
-        The first detected Request ID, or ``None`` if no surveys visible.
+        Request ID string (e.g. ``"695584131"``), or ``None`` if no
+        survey is currently visible.
     """
-    # ── Strategy 1: dedicated request-id element ──────────────────────────────
-    try:
-        el = page.locator(TryRatingSelectors.REQUEST_ID_ELEMENT).first
-        el.wait_for(state="visible", timeout=SHORT_ELEMENT_TIMEOUT)
-        raw_text = el.inner_text().strip()
-
-        # If the element text is purely numeric, use it directly
-        if raw_text.isdigit() and len(raw_text) >= 6:
-            logger.debug("Request ID from dedicated element: {}", raw_text)
-            return raw_text
-
-        # Otherwise attempt pattern extraction (may include a label)
-        extracted = _extract_id_from_text(raw_text)
+    # ── Strategy 1: XPath sibling ─────────────────────────────────────────────
+    raw = _try_locator(
+        page,
+        TryRatingSelectors.REQUEST_ID_XPATH_SIBLING,
+        SHORT_ELEMENT_TIMEOUT,
+    )
+    if raw:
+        candidate = raw.strip()
+        if _REQUEST_ID_RE.fullmatch(candidate.replace(" ", "")):
+            logger.debug("Request ID via XPath sibling: {}", candidate)
+            return candidate
+        # Value may have extra whitespace or label prefix — extract with regex
+        extracted = _regex_extract(candidate)
         if extracted:
-            logger.debug("Request ID extracted from element text: {}", extracted)
+            logger.debug("Request ID extracted from sibling text: {}", extracted)
             return extracted
 
-    except PlaywrightTimeoutError:
-        logger.debug("Dedicated request-id element not found — trying card scan.")
-    except Exception as exc:
-        logger.warning("Error reading request-id element: {}", exc)
+    logger.debug("XPath sibling strategy found nothing — trying following::*")
 
-    # ── Strategy 2: scan all survey cards ─────────────────────────────────────
+    # ── Strategy 2: XPath following ───────────────────────────────────────────
+    raw = _try_locator(
+        page,
+        TryRatingSelectors.REQUEST_ID_XPATH_FOLLOWING,
+        SHORT_ELEMENT_TIMEOUT,
+    )
+    if raw:
+        extracted = _regex_extract(raw.strip())
+        if extracted:
+            logger.debug("Request ID via XPath following: {}", extracted)
+            return extracted
+
+    logger.debug("XPath following strategy found nothing — scanning full page text")
+
+    # ── Strategy 3: full-page text scan ───────────────────────────────────────
     try:
-        cards = page.locator(TryRatingSelectors.SURVEY_CARD).all()
-        if not cards:
-            logger.debug("No survey cards found on page.")
-            return None
+        body_text = page.locator("body").inner_text()
 
-        logger.debug("Scanning {} survey card(s) for Request ID.", len(cards))
-        for card in cards:
-            text = card.inner_text()
-            extracted = _extract_id_from_text(text)
-            if extracted:
-                logger.debug("Request ID from card scan: {}", extracted)
-                return extracted
+        # Find the "Request ID" label in the page text and grab what follows it
+        label_match = re.search(
+            r"Request\s+ID[\s:]*(\d{6,})", body_text, re.IGNORECASE
+        )
+        if label_match:
+            extracted = label_match.group(1)
+            logger.debug("Request ID via full-page text scan: {}", extracted)
+            return extracted
+
+        # Broader regex as absolute last resort
+        extracted = _regex_extract(body_text)
+        if extracted:
+            logger.debug(
+                "Request ID via broad regex (no label anchor): {}", extracted
+            )
+            return extracted
 
     except Exception as exc:
-        logger.warning("Error during survey card scan: {}", exc)
+        logger.warning("Full-page text scan failed: {}", exc)
 
+    logger.debug("All extraction strategies exhausted — no Request ID found.")
     return None
 
 
 def check_for_new_survey(page: Page) -> Optional[str]:
     """
-    Execute a complete survey-check cycle and return a Request ID if found.
+    Execute one complete survey-check cycle.
 
-    This is the primary entry point called by the scheduler job in
-    :class:`~app.watchtower.Watchtower`.
-
-    Steps
-    -----
-    1. Apply random pre-check jitter (anti-bot / rate-limit mitigation).
-    2. Click "Get Surveys" if the button is visible.
-    3. Attempt to extract a Request ID.
+    Steps:
+    1. Apply random jitter (anti-bot / rate-limit mitigation).
+    2. Click the "Check Now" button to refresh survey availability.
+    3. Extract a Request ID using the three-strategy XPath approach.
 
     Parameters
     ----------
     page:
-        Active Playwright page on the TryRating surveys URL.
+        Active Playwright page on ``tryrating.com/app/survey/rate``.
 
     Returns
     -------
     str | None
-        Detected Request ID string, or ``None`` when no surveys exist.
+        Request ID string if a survey is visible, ``None`` otherwise.
     """
     jitter_ms = random.randint(JITTER_MIN_MS, JITTER_MAX_MS)
-    logger.debug("Applying pre-check jitter: {}ms.", jitter_ms)
+    logger.debug("Pre-check jitter: {}ms.", jitter_ms)
     page.wait_for_timeout(jitter_ms)
 
     click_check_surveys(page)

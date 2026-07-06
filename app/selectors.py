@@ -119,40 +119,56 @@ class TryRatingSelectors:
         "[data-testid='get-surveys-button']"
     )
 
-    # Container for a single survey card / table row.
-    # Used to iterate over available surveys.
+    # Container for a survey card.
+    # XPath: any element containing the text 'Request ID' anywhere inside it.
+    # Used when iterating multiple survey cards.
     SURVEY_CARD: str = (
-        ".survey-card, "
-        ".survey-item, "
-        ".task-card, "
-        ".task-item, "
-        "[data-testid='survey-card'], "
-        "[data-testid='task-card'], "
-        "li.survey, "
-        "tr.survey-row"
+        "xpath=//*[.//text()[normalize-space()='Request ID']]"
     )
 
-    # The element inside a survey card that displays the Request ID.
-    # TryRating Request IDs are long numeric strings, e.g. 695584131.
-    # This is the PRIMARY selector — update this first if surveys stop being detected.
-    REQUEST_ID_ELEMENT: str = (
-        "[data-testid='request-id'], "
-        ".request-id, "
-        "#request-id, "
-        "span[class*='request-id' i], "
-        "td[class*='request' i], "
-        "span[class*='task-id' i], "
-        "[data-field='requestId']"
+    # ── Request ID (XPath-first, confirmed from live screenshot) ──────────────
+    # Confirmed UI structure (2025-07):
+    #
+    #   Request ID        <- label text node
+    #   695584131         <- value text node (sibling element below label)
+    #
+    # All three strategies anchor to the literal label text 'Request ID',
+    # so they work regardless of CSS class names or layout changes.
+
+    # Strategy 1 (PRIMARY): following SIBLING element containing only digits >= 6 chars.
+    # Works when label and value are siblings inside the same parent.
+    REQUEST_ID_XPATH_SIBLING: str = (
+        "xpath=//*[normalize-space(text())='Request ID']"
+        "/following-sibling::*"
+        "[translate(normalize-space(.), '0123456789', '')='' "
+        "and string-length(normalize-space(.)) >= 6][1]"
+    )
+
+    # Strategy 2 (FALLBACK): following element anywhere in the document after
+    # the label, restricted to digit-only content >= 6 chars.
+    # Works when label and value are NOT direct siblings.
+    REQUEST_ID_XPATH_FOLLOWING: str = (
+        "xpath=//*[normalize-space(text())='Request ID']"
+        "/following::*"
+        "[translate(normalize-space(.), '0123456789', '')='' "
+        "and string-length(normalize-space(.)) >= 6][1]"
+    )
+
+    # Strategy 3 (BROAD FALLBACK): first following text node after the label,
+    # validated by regex in Python. Used when the value is a raw text node,
+    # not wrapped in an element.
+    REQUEST_ID_XPATH_TEXT_NODE: str = (
+        "xpath=//*[normalize-space(text())='Request ID']"
+        "/following::text()[normalize-space()][1]"
     )
 
     # Text / element shown when no surveys are currently available.
-    # Presence of this element is used to confirm a "no surveys" state
-    # rather than a page-load or selector failure.
+    # Confirmed from live screenshot: 'No more surveys' heading.
     NO_SURVEYS_TEXT: str = (
+        "text='No more surveys', "
+        "text='Please check back later', "
         "text='No surveys available', "
-        "text='No tasks available', "
         "text='No results', "
         ".no-surveys, "
-        ".empty-state, "
-        "[data-testid='empty-surveys']"
+        ".empty-state"
     )
