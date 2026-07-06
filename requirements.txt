@@ -1,0 +1,15 @@
+# Watchtower Python dependencies
+# Generated: 2025-07
+# Install with: pip install -r requirements.txt
+
+# Browser automation
+playwright>=1.44.0
+
+# Scheduling
+APScheduler>=3.10.4
+
+# Environment / configuration
+python-dotenv>=1.0.1
+
+# Structured logging
+loguru>=0.7.2

@@ -1,0 +1,51 @@
+# Watchtower .gitignore
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# ── Playwright ────────────────────────────────────────────────────────────────
+# Exclude downloaded browser binaries if stored locally
+playwright-browsers/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+*.log.gz
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+# state.json contains runtime data — do not commit
+data/state.json
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── SSH keys ──────────────────────────────────────────────────────────────────
+*.key
+*.pem
+*.pub
