@@ -3,29 +3,33 @@ app/survey_checker.py
 =====================
 Survey detection and Request ID extraction for Watchtower.
 
+Stale DOM bug fix (v1.1.0)
+---------------------------
+TryRating is a single-page app.  When a completed or expired survey is
+dismissed, the DOM is NOT fully cleared — previous survey elements remain
+hidden/cached.  Before this fix, XPath matched those stale elements and
+kept returning the old Request ID, causing false-positive "already seen"
+suppression of genuinely new surveys.
+
+Fix: ``_is_no_survey_state()`` is called **before** any XPath runs.  If
+TryRating is explicitly showing "No more surveys", extraction returns
+``None`` immediately without touching the DOM further.
+
+The broad regex fallback (any 6+ digit number on the page) was also
+removed — it matched hidden DOM data.  Strategy 3 now only matches digits
+that **explicitly follow** the visible "Request ID" label text.
+
 Extraction approach
 -------------------
-All extraction anchors to the literal label text **"Request ID"** visible
-on the TryRating survey page.  No CSS class names are used.  Three XPath
-strategies are attempted in order:
-
-1. **Sibling XPath** — element immediately after the "Request ID" label
-   that contains only digits (>= 6).  Works when label and value share a
-   parent container.
-
-2. **Following XPath** — same digit constraint, but searches the entire
-   document forward from the label.  Handles non-adjacent layouts.
-
-3. **Full-page regex** — scans the complete rendered page text for any
-   standalone sequence of 6+ digits.  Last resort; validates with regex.
+1. **Guard** — visible "No more surveys" text? Return None immediately.
+2. **XPath sibling** — element after "Request ID" label, digits-only >= 6.
+3. **XPath following** — same constraint, broader document scope.
+4. **Label-anchored text scan** — regex ``Request ID <digits>`` in body text.
 
 Confirmed UI structure (2025-07, from live TryRating screenshot)::
 
     Request ID          <- label
     695584131           <- value (always >= 9 digits)
-
-Only Request ID is extracted.  Task type, estimated time, business data,
-descriptions and button labels are all intentionally ignored.
 """
 
 from __future__ import annotations
@@ -84,6 +88,36 @@ def _try_locator(page: Page, selector: str, timeout: int) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# No-survey state guard
+# ---------------------------------------------------------------------------
+
+def _is_no_survey_state(page: Page) -> bool:
+    """
+    Return ``True`` if TryRating is explicitly showing a "no surveys" state.
+
+    TryRating is a single-page app.  When a survey is completed or expires,
+    the DOM is NOT fully cleared — previous survey elements may remain
+    hidden/cached.  Without this guard, XPath would match those stale
+    elements and return the old Request ID as if it were a live survey.
+
+    Confirmed text from live screenshot:
+        * Heading  : ``"No more surveys"``
+        * Subtitle : ``"Please check back later."``
+
+    This check runs **before** any XPath extraction.  If either string is
+    visible, extraction is skipped entirely and ``None`` is returned.
+    """
+    try:
+        if page.locator("text=No more surveys").is_visible():
+            return True
+        if page.locator("text=Please check back later").is_visible():
+            return True
+    except Exception as exc:
+        logger.debug("No-survey state check raised (non-fatal): {}", exc)
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
 
@@ -117,16 +151,22 @@ def extract_request_id(page: Page) -> Optional[str]:
     """
     Extract a Request ID from the current surveys page using XPath.
 
-    Three strategies, in priority order:
+    Guard
+    -----
+    First checks for the visible "No more surveys" state.  If TryRating is
+    explicitly reporting no surveys, returns ``None`` immediately without
+    running any XPath — preventing false positives from stale SPA DOM data.
 
-    1. **XPath sibling** — find element with text "Request ID", then get
-       the first following sibling that is all-digits with >= 6 chars.
-
-    2. **XPath following** — same but searches the whole document forward.
-       Handles layouts where label and value are not direct siblings.
-
-    3. **Full-page text scan** — reads all rendered page text and applies
-       ``_REQUEST_ID_RE`` regex.  Catches any structure not covered above.
+    Strategies (in priority order)
+    --------------------------------
+    1. **XPath sibling** — find element with text "Request ID", get the
+       first following sibling that is all-digits with >= 6 chars.
+    2. **XPath following** — same constraint, broader document scope.
+       Works when label and value are not direct siblings.
+    3. **Label-anchored text scan** — regex anchored to "Request ID" label
+       in full body text.  Only matches digits after the label — the
+       previous broad regex fallback was removed because it matched any
+       6+ digit number on the page, including stale/hidden DOM data.
 
     Parameters
     ----------
@@ -139,6 +179,13 @@ def extract_request_id(page: Page) -> Optional[str]:
         Request ID string (e.g. ``"695584131"``), or ``None`` if no
         survey is currently visible.
     """
+    # ── Guard: explicit no-survey state ───────────────────────────────────────
+    # Must run before XPath — TryRating SPA leaves stale DOM after a survey
+    # is completed, so XPath would find the old Request ID in hidden elements.
+    if _is_no_survey_state(page):
+        logger.debug("'No more surveys' visible — skipping extraction.")
+        return None
+
     # ── Strategy 1: XPath sibling ─────────────────────────────────────────────
     raw = _try_locator(
         page,
@@ -150,7 +197,6 @@ def extract_request_id(page: Page) -> Optional[str]:
         if _REQUEST_ID_RE.fullmatch(candidate.replace(" ", "")):
             logger.debug("Request ID via XPath sibling: {}", candidate)
             return candidate
-        # Value may have extra whitespace or label prefix — extract with regex
         extracted = _regex_extract(candidate)
         if extracted:
             logger.debug("Request ID extracted from sibling text: {}", extracted)
@@ -170,31 +216,23 @@ def extract_request_id(page: Page) -> Optional[str]:
             logger.debug("Request ID via XPath following: {}", extracted)
             return extracted
 
-    logger.debug("XPath following strategy found nothing — scanning full page text")
+    logger.debug("XPath following strategy found nothing — trying label-anchored text scan")
 
-    # ── Strategy 3: full-page text scan ───────────────────────────────────────
+    # ── Strategy 3: label-anchored text scan ──────────────────────────────────
+    # Only matches digits that EXPLICITLY follow the "Request ID" label text.
+    # Broad regex fallback was removed — it matched stale hidden DOM data and
+    # caused false "already seen" suppression of genuinely new surveys.
     try:
         body_text = page.locator("body").inner_text()
-
-        # Find the "Request ID" label in the page text and grab what follows it
         label_match = re.search(
             r"Request\s+ID[\s:]*(\d{6,})", body_text, re.IGNORECASE
         )
         if label_match:
             extracted = label_match.group(1)
-            logger.debug("Request ID via full-page text scan: {}", extracted)
+            logger.debug("Request ID via label-anchored text scan: {}", extracted)
             return extracted
-
-        # Broader regex as absolute last resort
-        extracted = _regex_extract(body_text)
-        if extracted:
-            logger.debug(
-                "Request ID via broad regex (no label anchor): {}", extracted
-            )
-            return extracted
-
     except Exception as exc:
-        logger.warning("Full-page text scan failed: {}", exc)
+        logger.warning("Label-anchored text scan failed: {}", exc)
 
     logger.debug("All extraction strategies exhausted — no Request ID found.")
     return None
@@ -207,7 +245,8 @@ def check_for_new_survey(page: Page) -> Optional[str]:
     Steps:
     1. Apply random jitter (anti-bot / rate-limit mitigation).
     2. Click the "Check Now" button to refresh survey availability.
-    3. Extract a Request ID using the three-strategy XPath approach.
+    3. Guard: return None immediately if "No more surveys" is visible.
+    4. Extract a Request ID using the three-strategy XPath approach.
 
     Parameters
     ----------
