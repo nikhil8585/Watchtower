@@ -244,9 +244,21 @@ def check_for_new_survey(page: Page) -> Optional[str]:
 
     Steps:
     1. Apply random jitter (anti-bot / rate-limit mitigation).
-    2. Click the "Check Now" button to refresh survey availability.
+    2. **Soft reload** the survey page — forces TryRating SPA to re-initialise
+       and make a fresh API call for current survey data.  Without this,
+       the headless browser session accumulates stale JS component state and
+       the "Check Now" click does not actually fetch updated data.
     3. Guard: return None immediately if "No more surveys" is visible.
-    4. Extract a Request ID using the three-strategy XPath approach.
+    4. Click "Check Now" (now on a freshly-loaded page).
+    5. Extract a Request ID using the three-strategy XPath approach.
+
+    Why soft reload, not hard reload?
+    ----------------------------------
+    Survey availability is delivered by TryRating's API, not from browser
+    cache.  A soft reload (``F5`` equivalent) re-initialises the SPA and
+    triggers fresh API calls.  A hard reload (``Ctrl+Shift+R``) additionally
+    forces static JS/CSS files to re-download — unnecessary overhead with
+    no benefit for dynamic survey data.
 
     Parameters
     ----------
@@ -262,8 +274,52 @@ def check_for_new_survey(page: Page) -> Optional[str]:
     logger.debug("Pre-check jitter: {}ms.", jitter_ms)
     page.wait_for_timeout(jitter_ms)
 
+    # ── Soft reload ───────────────────────────────────────────────────────────
+    # Re-initialises TryRating SPA state so Check Now fetches live data.
+    # wait_until="networkidle" ensures the SPA's initial API calls complete
+    # before we interact with the page.
+    try:
+        logger.debug("Soft-reloading survey page to refresh SPA state.")
+        page.reload(wait_until="networkidle", timeout=30_000)
+        logger.debug("Page reloaded — SPA re-initialised.")
+    except PlaywrightTimeoutError:
+        # networkidle timed out — TryRating may be slow but page still loaded.
+        # Proceed rather than skipping the entire cycle.
+        logger.warning(
+            "Page reload networkidle timeout — proceeding with current state."
+        )
+    except Exception as exc:
+        logger.warning("Page reload failed ({}): {}", type(exc).__name__, exc)
+
+    # ── Post-reload URL guard ─────────────────────────────────────────────────
+    # If the reload redirected us to the login page, bail out.
+    # The URL drift detection in watchtower._job_survey_check will handle
+    # re-authentication on the next cycle.
+    if "/survey/" not in page.url.lower():
+        logger.warning(
+            "Reload redirected away from survey page (url={}) — "
+            "session may have expired. Skipping extraction.",
+            page.url,
+        )
+        return None
+
+    # ── No-survey guard ───────────────────────────────────────────────────────
+    # Check visibility BEFORE clicking Check Now so we don't waste a click.
+    if _is_no_survey_state(page):
+        logger.debug("'No more surveys' visible after reload — no extraction needed.")
+        return None
+
+    # ── Click Check Now ───────────────────────────────────────────────────────
     click_check_surveys(page)
 
+    # ── Post-click no-survey guard ────────────────────────────────────────────
+    # Check again after the button click — the API response may have
+    # updated the page to show "No more surveys".
+    if _is_no_survey_state(page):
+        logger.debug("'No more surveys' visible after Check Now click.")
+        return None
+
+    # ── Extract Request ID ────────────────────────────────────────────────────
     request_id = extract_request_id(page)
 
     if request_id:
