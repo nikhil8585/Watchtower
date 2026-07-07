@@ -3,33 +3,35 @@ app/survey_checker.py
 =====================
 Survey detection and Request ID extraction for Watchtower.
 
-Stale DOM bug fix (v1.1.0)
----------------------------
-TryRating is a single-page app.  When a completed or expired survey is
-dismissed, the DOM is NOT fully cleared — previous survey elements remain
-hidden/cached.  Before this fix, XPath matched those stale elements and
-kept returning the old Request ID, causing false-positive "already seen"
-suppression of genuinely new surveys.
+How the check cycle works (v1.1.0)
+-------------------------------------
+Every 60 seconds:
 
-Fix: ``_is_no_survey_state()`` is called **before** any XPath runs.  If
-TryRating is explicitly showing "No more surveys", extraction returns
-``None`` immediately without touching the DOM further.
+1. Jitter — random 0.5–5s delay (anti-bot mitigation)
+2. Soft page.reload(wait_until="networkidle")
+   - Forces TryRating SPA to re-initialise and make a fresh API call
+   - Fixes stale headless session state (the root cause of missed surveys)
+3. Post-reload URL guard — if session expired and redirected to login,
+   bail out and let watchtower.py handle re-auth next cycle
+4. ALWAYS click "Check Now"
+   - This is TryRating's server-fetch trigger
+   - Must run regardless of what the page shows post-reload
+   - The initial post-reload state is the LAST KNOWN state, not live data
+5. Post-click no-survey check — if "No more surveys" is confirmed after
+   the button has fetched fresh data, return None
+6. XPath extraction — three strategies anchored to "Request ID" label text
 
-The broad regex fallback (any 6+ digit number on the page) was also
-removed — it matched hidden DOM data.  Strategy 3 now only matches digits
-that **explicitly follow** the visible "Request ID" label text.
+Stale DOM fix
+-------------
+TryRating SPA does not fully clear the DOM when a survey is dismissed.
+The previous Request ID remains in hidden elements.  Without the
+``_is_no_survey_state()`` guard (checked only AFTER clicking Check Now),
+XPath would match stale data and keep returning the old ID.
 
-Extraction approach
+Broad regex removed
 -------------------
-1. **Guard** — visible "No more surveys" text? Return None immediately.
-2. **XPath sibling** — element after "Request ID" label, digits-only >= 6.
-3. **XPath following** — same constraint, broader document scope.
-4. **Label-anchored text scan** — regex ``Request ID <digits>`` in body text.
-
-Confirmed UI structure (2025-07, from live TryRating screenshot)::
-
-    Request ID          <- label
-    695584131           <- value (always >= 9 digits)
+Strategy 3 no longer contains a free-floating "any 6+ digit number"
+fallback.  It is anchored to the "Request ID" label text only.
 """
 
 from __future__ import annotations
@@ -55,7 +57,6 @@ from app.selectors import TryRatingSelectors
 
 # Matches a standalone numeric sequence of 6 or more digits.
 # TryRating IDs are typically 9 digits (e.g. 695584131).
-# Lower bound of 6 avoids false-positives on short numbers in body text.
 _REQUEST_ID_RE: re.Pattern[str] = re.compile(r"\b(\d{6,})\b")
 
 
@@ -95,17 +96,13 @@ def _is_no_survey_state(page: Page) -> bool:
     """
     Return ``True`` if TryRating is explicitly showing a "no surveys" state.
 
-    TryRating is a single-page app.  When a survey is completed or expires,
-    the DOM is NOT fully cleared — previous survey elements may remain
-    hidden/cached.  Without this guard, XPath would match those stale
-    elements and return the old Request ID as if it were a live survey.
+    Checked only AFTER clicking "Check Now" — the button must run first
+    to fetch live data.  Checking before the click would give the last
+    known (potentially stale) state, not the current server state.
 
     Confirmed text from live screenshot:
-        * Heading  : ``"No more surveys"``
-        * Subtitle : ``"Please check back later."``
-
-    This check runs **before** any XPath extraction.  If either string is
-    visible, extraction is skipped entirely and ``None`` is returned.
+        * Heading  : "No more surveys"
+        * Subtitle : "Please check back later."
     """
     try:
         if page.locator("text=No more surveys").is_visible():
@@ -151,41 +148,20 @@ def extract_request_id(page: Page) -> Optional[str]:
     """
     Extract a Request ID from the current surveys page using XPath.
 
-    Guard
-    -----
-    First checks for the visible "No more surveys" state.  If TryRating is
-    explicitly reporting no surveys, returns ``None`` immediately without
-    running any XPath — preventing false positives from stale SPA DOM data.
+    Call this only AFTER ``click_check_surveys()`` has run and the page
+    has been confirmed to NOT be in a no-survey state.
 
     Strategies (in priority order)
     --------------------------------
-    1. **XPath sibling** — find element with text "Request ID", get the
-       first following sibling that is all-digits with >= 6 chars.
+    1. **XPath sibling** — element after "Request ID" label, digits-only >= 6.
     2. **XPath following** — same constraint, broader document scope.
-       Works when label and value are not direct siblings.
-    3. **Label-anchored text scan** — regex anchored to "Request ID" label
-       in full body text.  Only matches digits after the label — the
-       previous broad regex fallback was removed because it matched any
-       6+ digit number on the page, including stale/hidden DOM data.
-
-    Parameters
-    ----------
-    page:
-        Active Playwright page on ``tryrating.com/app/survey/rate``.
+    3. **Label-anchored text scan** — regex anchored to "Request ID" label.
 
     Returns
     -------
     str | None
-        Request ID string (e.g. ``"695584131"``), or ``None`` if no
-        survey is currently visible.
+        Request ID string (e.g. ``"695584131"``), or ``None``.
     """
-    # ── Guard: explicit no-survey state ───────────────────────────────────────
-    # Must run before XPath — TryRating SPA leaves stale DOM after a survey
-    # is completed, so XPath would find the old Request ID in hidden elements.
-    if _is_no_survey_state(page):
-        logger.debug("'No more surveys' visible — skipping extraction.")
-        return None
-
     # ── Strategy 1: XPath sibling ─────────────────────────────────────────────
     raw = _try_locator(
         page,
@@ -219,9 +195,7 @@ def extract_request_id(page: Page) -> Optional[str]:
     logger.debug("XPath following strategy found nothing — trying label-anchored text scan")
 
     # ── Strategy 3: label-anchored text scan ──────────────────────────────────
-    # Only matches digits that EXPLICITLY follow the "Request ID" label text.
-    # Broad regex fallback was removed — it matched stale hidden DOM data and
-    # caused false "already seen" suppression of genuinely new surveys.
+    # Only matches digits that explicitly follow the "Request ID" label.
     try:
         body_text = page.locator("body").inner_text()
         label_match = re.search(
@@ -243,22 +217,27 @@ def check_for_new_survey(page: Page) -> Optional[str]:
     Execute one complete survey-check cycle.
 
     Steps:
-    1. Apply random jitter (anti-bot / rate-limit mitigation).
-    2. **Soft reload** the survey page — forces TryRating SPA to re-initialise
-       and make a fresh API call for current survey data.  Without this,
-       the headless browser session accumulates stale JS component state and
-       the "Check Now" click does not actually fetch updated data.
-    3. Guard: return None immediately if "No more surveys" is visible.
-    4. Click "Check Now" (now on a freshly-loaded page).
-    5. Extract a Request ID using the three-strategy XPath approach.
+    1. Random jitter (anti-bot mitigation).
+    2. Soft page reload — re-initialises TryRating SPA, forces fresh API call.
+    3. Post-reload URL guard — bail if session expired.
+    4. Always click "Check Now" — TryRating's server-fetch trigger.
+    5. Post-click no-survey check — if confirmed empty, return None.
+    6. Extract Request ID via XPath.
+
+    Why always click Check Now (even when "No more surveys" shows)?
+    ----------------------------------------------------------------
+    After reload, TryRating renders its LAST KNOWN state before clicking
+    Check Now.  The page may show "No more surveys" even if a new survey
+    has just become available on TryRating's server.  Clicking the button
+    is what triggers the actual live fetch.  Only the post-click state is
+    the ground truth.
 
     Why soft reload, not hard reload?
     ----------------------------------
-    Survey availability is delivered by TryRating's API, not from browser
-    cache.  A soft reload (``F5`` equivalent) re-initialises the SPA and
-    triggers fresh API calls.  A hard reload (``Ctrl+Shift+R``) additionally
-    forces static JS/CSS files to re-download — unnecessary overhead with
-    no benefit for dynamic survey data.
+    Survey data comes from TryRating's API, not browser cache.  A soft
+    reload (F5 equivalent) re-initialises the SPA and triggers fresh API
+    calls.  Hard reload (Ctrl+Shift+R) additionally re-downloads JS/CSS
+    bundles — wasted bandwidth with no benefit for dynamic data.
 
     Parameters
     ----------
@@ -270,14 +249,14 @@ def check_for_new_survey(page: Page) -> Optional[str]:
     str | None
         Request ID string if a survey is visible, ``None`` otherwise.
     """
+    # ── 1. Jitter ─────────────────────────────────────────────────────────────
     jitter_ms = random.randint(JITTER_MIN_MS, JITTER_MAX_MS)
     logger.debug("Pre-check jitter: {}ms.", jitter_ms)
     page.wait_for_timeout(jitter_ms)
 
-    # ── Soft reload ───────────────────────────────────────────────────────────
-    # Re-initialises TryRating SPA state so Check Now fetches live data.
-    # wait_until="networkidle" ensures the SPA's initial API calls complete
-    # before we interact with the page.
+    # ── 2. Soft reload ────────────────────────────────────────────────────────
+    # Re-initialises TryRating SPA state so the page fetches live survey data.
+    # wait_until="networkidle" waits for the SPA's initial API calls to settle.
     try:
         logger.debug("Soft-reloading survey page to refresh SPA state.")
         page.reload(wait_until="networkidle", timeout=30_000)
@@ -291,10 +270,9 @@ def check_for_new_survey(page: Page) -> Optional[str]:
     except Exception as exc:
         logger.warning("Page reload failed ({}): {}", type(exc).__name__, exc)
 
-    # ── Post-reload URL guard ─────────────────────────────────────────────────
-    # If the reload redirected us to the login page, bail out.
-    # The URL drift detection in watchtower._job_survey_check will handle
-    # re-authentication on the next cycle.
+    # ── 3. Post-reload URL guard ───────────────────────────────────────────────
+    # If reload redirected to login, bail out.
+    # watchtower._job_survey_check handles re-auth on the next cycle.
     if "/survey/" not in page.url.lower():
         logger.warning(
             "Reload redirected away from survey page (url={}) — "
@@ -303,23 +281,21 @@ def check_for_new_survey(page: Page) -> Optional[str]:
         )
         return None
 
-    # ── No-survey guard ───────────────────────────────────────────────────────
-    # Check visibility BEFORE clicking Check Now so we don't waste a click.
-    if _is_no_survey_state(page):
-        logger.debug("'No more surveys' visible after reload — no extraction needed.")
-        return None
-
-    # ── Click Check Now ───────────────────────────────────────────────────────
+    # ── 4. Always click Check Now ─────────────────────────────────────────────
+    # "Check Now" is TryRating's server-fetch trigger. It must run on every
+    # cycle regardless of what the page shows after reload.
+    # The post-reload state is the LAST KNOWN state, not live data.
+    # DO NOT gate this on a pre-click no-survey check — the page may show
+    # "No more surveys" even when a new survey just appeared on the server.
     click_check_surveys(page)
 
-    # ── Post-click no-survey guard ────────────────────────────────────────────
-    # Check again after the button click — the API response may have
-    # updated the page to show "No more surveys".
+    # ── 5. Post-click no-survey check ─────────────────────────────────────────
+    # NOW we trust the state — Check Now has fetched live data from the server.
     if _is_no_survey_state(page):
-        logger.debug("'No more surveys' visible after Check Now click.")
+        logger.debug("'No more surveys' confirmed after Check Now — none available.")
         return None
 
-    # ── Extract Request ID ────────────────────────────────────────────────────
+    # ── 6. Extract Request ID ─────────────────────────────────────────────────
     request_id = extract_request_id(page)
 
     if request_id:
