@@ -19,7 +19,11 @@ from pathlib import Path
 # Application identity
 # ---------------------------------------------------------------------------
 
-APP_VERSION: str = "1.0.0"
+# Semantic versioning: MAJOR.MINOR.PATCH
+# 1.0.0 — Initial production release
+# 1.1.0 — Navigation optimisation (stay on survey page), XPath extraction,
+#          startup health check, update.sh auto-deploy, URL corrections
+APP_VERSION: str = "1.1.0"
 APP_NAME: str = "Watchtower"
 
 # ---------------------------------------------------------------------------
