@@ -72,7 +72,7 @@ def _build_survey_email(
         f"Hostname         : {hostname}\n"
         f"Server Time      : {server_time}\n"
         "\n"
-        "Log in to TryRating now to accept the survey before it expires.\n"
+        "Log in to TryRating (https://www.tryrating.com/app/survey) and accept the survey before it expires.\n"
         "\n"
         "---\n"
         f"Watchtower {APP_VERSION} — automated monitoring"
