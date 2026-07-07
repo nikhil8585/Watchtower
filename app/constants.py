@@ -134,6 +134,10 @@ POST_SURVEY_CLICK_WAIT_S: float = 3.0  # pause after clicking Get Surveys
 JITTER_MIN_MS: int = 500             # minimum random pre-check jitter
 JITTER_MAX_MS: int = 5_000           # maximum random pre-check jitter
 
+# How often to run a full auth verification even while on the survey page.
+# Catches slow session expiry without penalising every check cycle.
+AUTH_CHECK_INTERVAL_S: int = 30 * 60   # 30 minutes
+
 # ---------------------------------------------------------------------------
 # State JSON field keys
 # ---------------------------------------------------------------------------

@@ -3,22 +3,23 @@ app/watchtower.py
 =================
 Central orchestrator for the Watchtower monitoring platform.
 
-Responsibilities
-----------------
-* Own the top-level application lifecycle (start → run → shutdown).
-* Wire together all subsystems: browser, state, scheduler, jobs.
-* Register OS signal handlers for graceful shutdown (SIGINT, SIGTERM).
-* Ensure no scheduled job terminates the process — all exceptions are
-  caught and logged; the scheduler continues.
-* Provide a clean extension point for future monitored sites (UHRS,
-  Prolific, Appen) without architectural changes.
+Survey check optimisation
+--------------------------
+The browser stays on the survey page permanently.  Every scheduled
+check cycle follows the fastest path first:
 
-Scheduler design
-----------------
-APScheduler's ``BlockingScheduler`` owns the main thread after
-:meth:`Watchtower.start` is called.  Jobs run in the scheduler's thread
-pool.  ``max_instances=1`` and ``coalesce=True`` guarantee that no
-survey-check job overlaps with itself under any scheduling drift.
+  1. ``/survey/`` in current URL  →  click "Check Now" directly.
+     (Handles query-string variations, e.g. ``?refresh=true``.)
+
+  2. URL drifted elsewhere  →  detect why (login page? error page?)
+     and recover silently without a full auth roundtrip.
+
+  3. Periodic full auth (every ``AUTH_CHECK_INTERVAL_S``)  →  catches
+     slow session expiry even when still appearing to be on the page.
+
+This eliminates the unnecessary navigate → check → navigate → check
+loop that the original design suffered from.  The browser touches the
+nav sidebar only when something has actually gone wrong.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from app.browser import BrowserManager
 from app.config import Config
 from app.constants import (
     APP_VERSION,
+    AUTH_CHECK_INTERVAL_S,
     HEARTBEAT_HOUR,
     HEARTBEAT_MINUTE,
     JOB_HEARTBEAT,
@@ -44,7 +46,7 @@ from app.constants import (
     LOGS_DIR,
 )
 from app.logger import logger
-from app.login import ensure_authenticated
+from app.login import ensure_authenticated, is_login_required
 from app.navigation import navigate_to_surveys
 from app.notifier import send_heartbeat, send_survey_notification
 from app.state import StateManager
@@ -68,6 +70,9 @@ class Watchtower:
         self._scheduler: Optional[BlockingScheduler] = None
         self._start_time: float = time.monotonic()
         self._running: bool = False
+        # Tracks the last time a full auth verification was performed.
+        # Initialised to 0 so the first cycle always does a full check.
+        self._last_auth_check: float = 0.0
 
     # -------------------------------------------------------------------------
     # Lifecycle
@@ -77,12 +82,10 @@ class Watchtower:
         """
         Initialise all subsystems and start the monitoring loop.
 
-        Execution flow:
         1. Register OS signal handlers.
         2. Launch Chromium.
-        3. Authenticate with TryRating.
-        4. Navigate to the surveys page.
-        5. Start APScheduler (this call blocks until shutdown).
+        3. Authenticate and navigate to the survey page.
+        4. Start APScheduler (blocks until shutdown).
         """
         logger.info(
             "=== Watchtower {} starting — instance={!r} ===",
@@ -94,52 +97,84 @@ class Watchtower:
         self._register_signal_handlers()
         self._browser.launch()
 
-        # Initial authentication
-        if not ensure_authenticated(
-            self._browser.page, self._config, self._state
-        ):
+        # Full session setup on start
+        if not self._perform_full_session_setup():
             logger.critical(
-                "Initial authentication failed — cannot start monitoring. "
-                "Check credentials and network connectivity."
-            )
-            self._shutdown()
-            return
-
-        # Initial navigation
-        if not navigate_to_surveys(self._browser.page):
-            logger.critical(
-                "Initial navigation to surveys page failed. "
-                "Check TRYRATING_SURVEYS_URL and selectors."
+                "Initial session setup failed — cannot start monitoring."
             )
             self._shutdown()
             return
 
         logger.info("Initialisation complete — starting scheduler.")
         self._running = True
-        self._start_scheduler()   # blocks until shutdown
+        self._start_scheduler()
+
+    # -------------------------------------------------------------------------
+    # Session management helpers
+    # -------------------------------------------------------------------------
+
+    def _perform_full_session_setup(self) -> bool:
+        """
+        Authenticate and navigate to the survey page.
+
+        Used on initial startup and after a browser restart.
+
+        Returns
+        -------
+        bool
+            ``True`` if the session is authenticated and the browser is
+            on the survey page.
+        """
+        if not ensure_authenticated(
+            self._browser.page, self._config, self._state
+        ):
+            return False
+        if not navigate_to_surveys(self._browser.page):
+            return False
+        self._last_auth_check = time.monotonic()
+        return True
+
+    def _recover_session(self) -> bool:
+        """
+        Recover from a drifted or expired session without a browser restart.
+
+        Called when the URL check shows we are no longer on the survey page.
+
+        Returns
+        -------
+        bool
+            ``True`` if the survey page was re-reached.
+        """
+        page = self._browser.page
+
+        if is_login_required(page):
+            logger.info(
+                "Session expired (login page detected) — re-authenticating."
+            )
+            if not ensure_authenticated(page, self._config, self._state):
+                logger.error("Re-authentication failed.")
+                return False
+            self._last_auth_check = time.monotonic()
+
+        if not navigate_to_surveys(page):
+            logger.error("Navigation recovery failed.")
+            return False
+
+        logger.info("Session recovered — back on survey page.")
+        return True
 
     # -------------------------------------------------------------------------
     # Graceful shutdown
     # -------------------------------------------------------------------------
 
     def _shutdown(self) -> None:
-        """
-        Gracefully terminate all subsystems.
-
-        Called from signal handlers or after a fatal startup error.
-        Safe to call multiple times (idempotent).
-        """
-        if not self._running and self._scheduler is None:
-            # Already shut down or never started
-            return
-
+        """Gracefully terminate all subsystems.  Safe to call multiple times."""
         logger.info("=== Watchtower shutting down ===")
         self._running = False
 
         if self._scheduler and self._scheduler.running:
             try:
                 self._scheduler.shutdown(wait=False)
-                logger.debug("Scheduler stopped.")
             except Exception as exc:
                 logger.debug("Scheduler shutdown error: {}", exc)
 
@@ -152,16 +187,14 @@ class Watchtower:
     # -------------------------------------------------------------------------
 
     def _register_signal_handlers(self) -> None:
-        """Attach SIGINT and SIGTERM to the graceful shutdown handler."""
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, self._handle_signal)
         logger.debug("Signal handlers registered for SIGINT and SIGTERM.")
 
     def _handle_signal(self, signum: int, frame) -> None:  # noqa: ANN001
-        """OS signal callback — triggers graceful shutdown."""
-        sig_name = signal.Signals(signum).name
         logger.info(
-            "Signal {} received — initiating graceful shutdown.", sig_name
+            "Signal {} received — initiating graceful shutdown.",
+            signal.Signals(signum).name,
         )
         self._shutdown()
 
@@ -170,12 +203,7 @@ class Watchtower:
     # -------------------------------------------------------------------------
 
     def _start_scheduler(self) -> None:
-        """
-        Configure and start the APScheduler.
-
-        This method blocks the calling thread until the scheduler is
-        stopped (via :meth:`_shutdown` or an OS signal).
-        """
+        """Configure APScheduler and block until shutdown."""
         self._scheduler = BlockingScheduler(
             timezone=self._config.timezone,
             job_defaults={
@@ -185,7 +213,6 @@ class Watchtower:
             },
         )
 
-        # ── Job 1: Survey monitor ─────────────────────────────────────────────
         self._scheduler.add_job(
             func=self._job_survey_check,
             trigger=IntervalTrigger(seconds=self._config.check_interval),
@@ -193,8 +220,6 @@ class Watchtower:
             name="Survey Monitor",
             replace_existing=True,
         )
-
-        # ── Job 2: Daily heartbeat ────────────────────────────────────────────
         self._scheduler.add_job(
             func=self._job_heartbeat,
             trigger=CronTrigger(
@@ -205,16 +230,12 @@ class Watchtower:
             id=JOB_HEARTBEAT,
             name="Daily Heartbeat",
             replace_existing=True,
-            misfire_grace_time=3_600,  # 1 hour — tolerate system sleep/boot
+            misfire_grace_time=3_600,
         )
-
-        # ── Job 3: Log cleanup (weekly, Sunday 03:00) ─────────────────────────
         self._scheduler.add_job(
             func=self._job_log_cleanup,
             trigger=CronTrigger(
-                day_of_week="sun",
-                hour=3,
-                minute=0,
+                day_of_week="sun", hour=3, minute=0,
                 timezone=self._config.timezone,
             ),
             id=JOB_LOG_CLEANUP,
@@ -223,11 +244,14 @@ class Watchtower:
         )
 
         logger.info(
-            "Scheduler active — survey check every {}s, heartbeat daily at {:02d}:{:02d} {}.",
+            "Scheduler active — survey check every {}s, "
+            "heartbeat daily at {:02d}:{:02d} {}, "
+            "full auth refresh every {}min.",
             self._config.check_interval,
             HEARTBEAT_HOUR,
             HEARTBEAT_MINUTE,
             self._config.timezone,
+            AUTH_CHECK_INTERVAL_S // 60,
         )
 
         try:
@@ -243,38 +267,72 @@ class Watchtower:
 
     def _job_survey_check(self) -> None:
         """
-        APScheduler job: execute one survey monitoring cycle.
+        APScheduler job: optimised survey monitoring cycle.
 
-        All exceptions are caught so the scheduler never terminates due
-        to an application-level error.  The browser is restarted if the
-        error appears to be browser-related.
+        Fast path (99% of cycles)
+        --------------------------
+        ``/survey/`` is in the current URL  →  click "Check Now" directly.
+        No navigation, no auth check, no sidebar interaction.
+
+        Recovery paths
+        --------------
+        * URL drifted elsewhere (but not login) → navigate back to surveys.
+        * Login page detected (session expired) → re-auth, then navigate.
+        * Browser crashed (``is_alive`` is False) → restart browser, full setup.
+
+        Periodic full auth check
+        ------------------------
+        Every ``AUTH_CHECK_INTERVAL_S`` seconds (~30 min), a full
+        ``ensure_authenticated`` call runs regardless of URL, catching
+        slow / silent session expiry before it becomes a problem.
         """
         try:
             logger.info("--- Survey check starting ---")
 
-            # ── Browser health check ──────────────────────────────────────────
+            # ── 1. Browser health ─────────────────────────────────────────────
             if not self._browser.is_alive:
-                logger.warning("Browser is unresponsive — restarting.")
+                logger.warning("Browser unresponsive — restarting.")
                 self._browser.restart()
+                if not self._perform_full_session_setup():
+                    logger.error(
+                        "Session setup after restart failed — skipping cycle."
+                    )
+                    return
 
             page = self._browser.page
+            now = time.monotonic()
+            current_url = page.url.lower()
 
-            # ── Session guard ─────────────────────────────────────────────────
-            if not ensure_authenticated(page, self._config, self._state):
-                logger.error(
-                    "Re-authentication failed — skipping this cycle. "
-                    "Will retry next interval."
+            # ── 2. Periodic full auth verification ────────────────────────────
+            if (now - self._last_auth_check) >= AUTH_CHECK_INTERVAL_S:
+                logger.info(
+                    "Periodic auth check — {}min interval elapsed.",
+                    AUTH_CHECK_INTERVAL_S // 60,
                 )
-                return
+                if not ensure_authenticated(page, self._config, self._state):
+                    logger.error(
+                        "Periodic auth check failed — skipping cycle."
+                    )
+                    return
+                if not navigate_to_surveys(page):
+                    logger.error(
+                        "Navigation after auth check failed — skipping cycle."
+                    )
+                    return
+                self._last_auth_check = time.monotonic()
 
-            # ── Navigation guard ──────────────────────────────────────────────
-            if not navigate_to_surveys(page):
-                logger.error(
-                    "Navigation to surveys failed — skipping this cycle."
+            # ── 3. URL check — fast path vs. recovery ─────────────────────────
+            elif "/survey/" not in current_url:
+                logger.warning(
+                    "Not on survey page (url={}) — recovering.", page.url
                 )
-                return
+                if not self._recover_session():
+                    logger.error(
+                        "Session recovery failed — skipping cycle."
+                    )
+                    return
 
-            # ── Check for surveys ─────────────────────────────────────────────
+            # ── 4. We are on the survey page — just check ─────────────────────
             request_id = check_for_new_survey(page)
             self._state.update_last_check()
 
@@ -282,51 +340,53 @@ class Watchtower:
                 logger.info("--- Survey check complete: no new surveys ---")
                 return
 
-            # ── Duplicate check ───────────────────────────────────────────────
             if self._state.has_seen(request_id):
                 logger.info(
-                    "Request ID {} already seen — suppressing duplicate notification.",
+                    "Request ID {} already seen — suppressing duplicate.",
                     request_id,
                 )
-                logger.info("--- Survey check complete: known survey ---")
                 return
 
-            # ── New survey ────────────────────────────────────────────────────
+            # ── 5. New survey found ───────────────────────────────────────────
             detected_at = datetime.now(tz=timezone.utc).isoformat()
             logger.info(
                 "NEW survey detected — Request ID: {}, detected at: {}",
                 request_id,
                 detected_at,
             )
-
             self._state.record_request_id(request_id)
-            sent = send_survey_notification(self._config, request_id, detected_at)
-
+            sent = send_survey_notification(
+                self._config, request_id, detected_at
+            )
             if sent:
                 logger.info("--- Survey check complete: notification sent ---")
             else:
                 logger.warning(
-                    "--- Survey check complete: survey recorded but email failed ---"
+                    "--- Survey check complete: survey recorded, email failed ---"
                 )
 
         except Exception as exc:
             logger.exception(
-                "Unhandled exception in survey check job: {}. "
-                "Attempting browser restart.",
+                "Unhandled exception in survey check — attempting recovery: {}",
                 exc,
             )
             try:
                 self._browser.restart()
+                self._perform_full_session_setup()
             except Exception as restart_exc:
                 logger.error(
-                    "Browser restart failed: {}. Will retry next cycle.", restart_exc
+                    "Recovery after exception failed: {}. "
+                    "Will retry next cycle.",
+                    restart_exc,
                 )
 
     def _job_heartbeat(self) -> None:
         """APScheduler job: send the daily heartbeat email."""
         try:
             uptime_s = time.monotonic() - self._start_time
-            logger.info("Sending daily heartbeat — uptime {:.1f}h.", uptime_s / 3600)
+            logger.info(
+                "Sending daily heartbeat — uptime {:.1f}h.", uptime_s / 3600
+            )
             success = send_heartbeat(
                 config=self._config,
                 last_check=self._state.last_check,
@@ -341,13 +401,7 @@ class Watchtower:
             logger.exception("Unhandled exception in heartbeat job: {}", exc)
 
     def _job_log_cleanup(self) -> None:
-        """
-        APScheduler job: remove compressed log archives older than 30 days.
-
-        Loguru's ``retention`` parameter handles rotation automatically.
-        This job provides an additional safety sweep for any orphaned
-        ``.gz`` files that bypass Loguru's cleanup (e.g. after a crash).
-        """
+        """APScheduler job: remove compressed log archives older than 30 days."""
         try:
             from datetime import timedelta
 
@@ -356,7 +410,6 @@ class Watchtower:
             removed = 0
 
             if not LOGS_DIR.exists():
-                logger.debug("Logs directory does not exist — skipping cleanup.")
                 return
 
             for gz_file in LOGS_DIR.glob("*.gz"):
@@ -366,7 +419,7 @@ class Watchtower:
                 if mtime < cutoff:
                     gz_file.unlink()
                     removed += 1
-                    logger.debug("Removed expired log archive: {}", gz_file.name)
+                    logger.debug("Removed: {}", gz_file.name)
 
             logger.info("Log cleanup complete — {} archive(s) removed.", removed)
         except Exception as exc:
