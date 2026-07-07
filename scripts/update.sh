@@ -79,7 +79,8 @@ fi
 # Step 2: Pull latest code
 # ---------------------------------------------------------------------------
 log_step "Pulling latest code from GitHub..."
-git pull origin master
+git fetch origin
+git reset --hard origin/master
 log_ok "Code updated."
 
 # ---------------------------------------------------------------------------
