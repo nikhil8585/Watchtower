@@ -37,6 +37,7 @@ logs/*.gz
 # ── Data ──────────────────────────────────────────────────────────────────────
 # state.json contains runtime data — do not commit
 data/state.json
+data/backups/
 
 # ── IDE / OS ──────────────────────────────────────────────────────────────────
 .idea/
