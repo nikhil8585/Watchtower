@@ -23,7 +23,10 @@ from pathlib import Path
 # 1.0.0 — Initial production release
 # 1.1.0 — Navigation optimisation (stay on survey page), XPath extraction,
 #          startup health check, update.sh auto-deploy, URL corrections
-APP_VERSION: str = "1.1.0"
+# 1.1.1 — Fix greenlet threading error: replace APScheduler ThreadPoolExecutor
+#          with a plain main-thread while-loop; dismiss task-type dialog;
+#          soft-reload each cycle for fresh SPA state
+APP_VERSION: str = "1.1.1"
 APP_NAME: str = "Watchtower"
 
 # ---------------------------------------------------------------------------
