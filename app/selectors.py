@@ -119,6 +119,36 @@ class TryRatingSelectors:
         "[data-testid='get-surveys-button']"
     )
 
+    # ── Task type launch dialog ────────────────────────────────────────────────
+    # Appears when starting a NEW TYPE of task for the first time in a session.
+    # Blocks all page interaction until dismissed.
+    #
+    # Confirmed UI (live screenshot, 2025-07):
+    #   Title  : "Now Launching [task-type-name]"  (e.g. "Now Launching SFX-MUSHRA")
+    #   Body   : "You are about to begin a different task type.
+    #             Please be sure you are familiar with the guidelines."
+    #   Buttons: × (top-right close)  |  OK (bottom-right, blue)
+    #
+    # Dismiss by clicking OK — confirms guideline acknowledgement.
+    # Must be checked BOTH after page.reload() and after clicking Check Now.
+
+    # Unique body text used to DETECT the dialog is open.
+    TASK_TYPE_DIALOG_INDICATOR: str = (
+        "text=You are about to begin a different task type"
+    )
+
+    # Primary dismiss action — click OK.
+    TASK_TYPE_DIALOG_OK: str = "button:has-text('OK')"
+
+    # Fallback dismiss — × close button (if OK is not found).
+    TASK_TYPE_DIALOG_CLOSE: str = (
+        "button[aria-label='Close'], "
+        "button.close, "
+        "[data-dismiss='modal'], "
+        "button:has-text('×')"
+    )
+
+
     # Container for a survey card.
     # XPath: any element containing the text 'Request ID' anywhere inside it.
     # Used when iterating multiple survey cards.

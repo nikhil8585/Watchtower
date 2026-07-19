@@ -114,6 +114,85 @@ def _is_no_survey_state(page: Page) -> bool:
     return False
 
 
+def dismiss_task_type_dialog(page: Page) -> bool:
+    """
+    Detect and dismiss the "Now Launching" task-type dialog if present.
+
+    TryRating shows this modal overlay whenever the session encounters a
+    NEW type of task for the first time.  Until dismissed, the dialog
+    blocks all interaction with the survey page underneath — including
+    XPath extraction of the Request ID.
+
+    Confirmed UI from live screenshot:
+        Title  : "Now Launching [task-type-name]"
+        Body   : "You are about to begin a different task type.
+                  Please be sure you are familiar with the guidelines."
+        Buttons: × (top-right close) | OK (bottom-right, blue)
+
+    Strategy
+    --------
+    1. Detect the dialog using its unique body text (short 2-second
+       timeout — fast no-op when not present).
+    2. Click OK (primary, confirms guideline acknowledgement).
+    3. Fall back to the × close button if OK is not found.
+
+    Called at two points per cycle:
+    * After ``page.reload()`` — a task from the previous cycle may have
+      left the dialog pending.
+    * After ``click_check_surveys()`` — a newly returned task type
+      triggers the dialog immediately after Check Now responds.
+
+    Returns
+    -------
+    bool
+        ``True`` if the dialog was found and dismissed.
+    """
+    try:
+        # Fast detection: 2-second timeout so normal cycles (no dialog)
+        # add only ~50ms of overhead via the immediate is_visible() check.
+        indicator = page.locator(TryRatingSelectors.TASK_TYPE_DIALOG_INDICATOR)
+        indicator.wait_for(state="visible", timeout=2_000)
+
+        logger.info(
+            "Task type launch dialog detected — dismissing before extraction."
+        )
+
+        # Primary: click OK
+        try:
+            ok_btn = page.locator(TryRatingSelectors.TASK_TYPE_DIALOG_OK).first
+            ok_btn.wait_for(state="visible", timeout=3_000)
+            ok_btn.click()
+            page.wait_for_timeout(600)  # let animation finish
+            logger.info("Task type dialog dismissed via OK button.")
+            return True
+        except PlaywrightTimeoutError:
+            pass
+
+        # Fallback: click × close button
+        try:
+            close_btn = page.locator(
+                TryRatingSelectors.TASK_TYPE_DIALOG_CLOSE
+            ).first
+            close_btn.wait_for(state="visible", timeout=3_000)
+            close_btn.click()
+            page.wait_for_timeout(600)
+            logger.info("Task type dialog dismissed via close button.")
+            return True
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "Task type dialog detected but neither OK nor close button "
+                "was clickable — extraction may fail."
+            )
+            return False
+
+    except PlaywrightTimeoutError:
+        # Dialog not present — normal case, fast path.
+        return False
+    except Exception as exc:
+        logger.warning("Unexpected error in dismiss_task_type_dialog: {}", exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
@@ -281,7 +360,12 @@ def check_for_new_survey(page: Page) -> Optional[str]:
         )
         return None
 
-    # ── 4. Always click Check Now ─────────────────────────────────────────────
+    # ── 4. Dismiss task-type dialog (post-reload) ───────────────────────────
+    # A "Now Launching" dialog from the previous cycle may still be open
+    # after reload.  Dismiss it so Check Now can be reached.
+    dismiss_task_type_dialog(page)
+
+    # ── 5. Always click Check Now ─────────────────────────────────────────────
     # "Check Now" is TryRating's server-fetch trigger. It must run on every
     # cycle regardless of what the page shows after reload.
     # The post-reload state is the LAST KNOWN state, not live data.
@@ -289,7 +373,13 @@ def check_for_new_survey(page: Page) -> Optional[str]:
     # "No more surveys" even when a new survey just appeared on the server.
     click_check_surveys(page)
 
-    # ── 5. Post-click no-survey check ─────────────────────────────────────────
+    # ── 6. Dismiss task-type dialog (post-Check Now) ────────────────────────
+    # When TryRating returns a NEW type of task, it immediately renders
+    # the "Now Launching" modal over the page.  XPath cannot see the
+    # Request ID underneath until this dialog is dismissed.
+    dismiss_task_type_dialog(page)
+
+    # ── 7. Post-click no-survey check ─────────────────────────────────────────
     # NOW we trust the state — Check Now has fetched live data from the server.
     if _is_no_survey_state(page):
         logger.debug("'No more surveys' confirmed after Check Now — none available.")
